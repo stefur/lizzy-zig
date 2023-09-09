@@ -42,6 +42,12 @@ pub const BusType = enum(i32) {
     _,
 };
 
+pub const BasicType = enum(u32) {
+    array = 97,
+    string = 115,
+    unknown,
+};
+
 extern fn dbus_connection_flush(connection: *Connection) void;
 pub const connectionFlush = dbus_connection_flush;
 
