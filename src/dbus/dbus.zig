@@ -13,6 +13,23 @@ pub const Error = extern struct {
     padding1: *void,
 };
 
+const ErrorTypes = error{
+    MethodCallFailed,
+    SendMessageFailed
+};
+
+// Probably not idiomatic
+pub const BasicType = enum(i32) {
+    array = typeArray,
+    string = typeString,
+    invalid = typeInvalid,
+};
+
+pub const typeArray: i32 = 97;
+pub const typeString: i32 = 115;
+pub const typeInvalid: i32 = 0;
+
+
 pub const MessageIter = extern struct {
     dummy1: *void,
     dummy2: *void,
@@ -32,7 +49,7 @@ pub const MessageIter = extern struct {
 
 pub const Connection = opaque {};
 pub const Message = opaque {};
-pub const HandleMessageFunction = *const fn (*Connection, *Message, *anyopaque) c_uint;
+pub const HandleMessageFunction = *const fn (*Connection, *Message, *anyopaque) void;
 pub const FreeFunction = opaque {};
 
 pub const BusType = enum(i32) {
@@ -40,12 +57,6 @@ pub const BusType = enum(i32) {
     system = 1,
     starter = 2,
     _,
-};
-
-pub const BasicType = enum(u32) {
-    array = 97,
-    string = 115,
-    unknown,
 };
 
 extern fn dbus_connection_flush(connection: *Connection) void;
@@ -77,8 +88,20 @@ pub const busAddFilter = dbus_connection_add_filter;
 extern fn dbus_error_init(err: *Error) void;
 pub const errorInit = dbus_error_init;
 
+extern fn dbus_error_is_set(err: *const Error) i32;
+pub const errorIsSet = dbus_error_is_set;
+
 extern fn dbus_message_append_args(message: *Message, first_arg_type: i32, ...) i32;
 pub const messageAppendArgs = dbus_message_append_args;
+
+extern fn dbus_message_get_sender(message: *Message) [*:0]const u8;
+pub const messageGetSender = dbus_message_get_sender;
+
+extern fn dbus_message_unref(message: *Message) void;
+pub const messageUnref = dbus_message_unref;
+
+extern fn dbus_bus_get_unique_name(connection: *Connection) [*:0]const u8;
+pub const busGetUniqueName = dbus_bus_get_unique_name;
 
 extern fn dbus_message_get_path(message: *Message) [*:0]const u8;
 pub const messageGetPath = dbus_message_get_path;

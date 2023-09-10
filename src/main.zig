@@ -1,5 +1,6 @@
 const std = @import("std");
 const dbus = @import("dbus/dbus.zig");
+const String = @import("zig_string").String;
 
 fn extractString(ptr: [*]const u8) ![]const u8 {
     const nullTerminator: u8 = 0;
@@ -21,6 +22,116 @@ pub const Metadata = struct {
 const metadataContent = enum { @"xesam:title", @"xesam:artist", other };
 const messageContent = enum { Metadata, PlaybackStatus, other };
 
+/// Ask DBus for the nameowner (ID) of an interface
+fn queryId(connection: *dbus.Connection, mediaplayer: []const u8) ![]const u8 {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    var name = String.init_with_contents(arena.allocator(), "org.mpris.MediaPlayer2.") catch |err| {
+        std.log.err("Initializing string for ID query failed.", .{});
+        return err;
+    };
+    defer name.deinit();
+
+    name.concat(mediaplayer) catch |err| {
+        std.log.err("Appending the mediaplayer to argument for ID query failed.", .{});
+        return err;
+    };
+    var argument = name.toOwned();
+
+    var err: dbus.Error = undefined;
+    dbus.errorInit(&err);
+
+    var query_message: *dbus.Message = dbus.messageNewMethodCall(
+        "org.freedesktop.DBus",
+        "/",
+        "org.freedesktop.DBus",
+        "GetNameOwner",
+    ) orelse {
+        const error_message = if (dbus.errorIsSet(&err) != 0) err.message else "unknown";
+        std.log.err("dbus_client: dbus_message_new_method_call failed. Error: {s}", .{error_message});
+        return error.MethodCallFailed;
+    };
+
+    var argument_type = dbus.typeString;
+    _ = dbus.messageAppendArgs(query_message, argument_type, &argument, dbus.typeInvalid);
+
+    var reply_message: *dbus.Message = dbus.connectionSendWithReplyAndBlock(
+        connection,
+        query_message,
+        1000,
+        &err,
+    ) orelse {
+        const error_message = if (dbus.errorIsSet(&err) != 0) err.message else "unknown";
+        std.log.err("dbus_client: dbus.connectionSendWithReplyAndBlock failed. Error: {s}", .{error_message});
+        return error.SendMessageFailed;
+    };
+
+    dbus.messageUnref(query_message);
+
+    var iter: dbus.MessageIter = undefined;
+
+    // Initialize iter of the reply
+    _ = dbus.messageIterInit(reply_message, &iter);
+
+    // The reply is a string, so we can pull it directly
+    var id: [*:0]const u8 = undefined;
+    dbus.messageIterGetBasic(&iter, @as(*void, @ptrCast(&id)));
+
+    var idString = try extractString(id);
+
+    std.debug.print("ID from query: {s}\n", .{idString});
+    return idString;
+}
+
+/// Ask for a given property of the mediaplayer, e.g. metadata fields or playbackstatus
+fn getProperty(comptime T: type, connection: *dbus.Connection) !void {
+    var err: dbus.Error = undefined;
+    dbus.errorInit(&err);
+
+    var query_message: *dbus.Message = dbus.messageNewMethodCall(
+        "org.mpris.MediaPlayer2.spotify",
+        "/org/mpris/MediaPlayer2",
+        "org.freedesktop.DBus.Properties",
+        "Get",
+    ) orelse {
+        std.log.err("dbus_client: dbus_message_new_method_call failed.", .{});
+        return;
+    };
+
+    const arg1 = "org.mpris.MediaPlayer2.Player";
+    const arg2 = "PlaybackStatus";
+
+    _ = dbus.messageAppendArgs(query_message, dbus.typeString, &arg1, dbus.typeString, &arg2, dbus.typeInvalid);
+
+    var reply_message: *dbus.Message = dbus.connectionSendWithReplyAndBlock(
+        connection,
+        query_message,
+        1000,
+        &err,
+    ) orelse {
+        std.log.err("dbus_client: dbus.connectionSendWithReplyAndBlock failed. Error", .{});
+        return;
+    };
+
+    dbus.messageUnref(query_message);
+
+    var iter: dbus.MessageIter = undefined;
+    var sub: dbus.MessageIter = undefined;
+
+    _ = dbus.messageIterInit(reply_message, &iter);
+
+    dbus.messageIterRecurse(&iter, &sub);
+
+    var result: T = undefined;
+    dbus.messageIterGetBasic(&sub, @as(*void, @ptrCast(&result)));
+    dbus.messageUnref(reply_message);
+
+    std.debug.print("Response: {s}", .{result});
+    //return result;
+}
+
+/// Get the dict value from a MessageIter depending on the type within.
 fn getDictValue(dictKey: *dbus.MessageIter) !void {
     // Move to the value which is a variant
     _ = dbus.messageIterNext(dictKey);
@@ -31,12 +142,13 @@ fn getDictValue(dictKey: *dbus.MessageIter) !void {
 
     var variantContains = dbus.messageIterGetArgType(&dictVariant);
 
-    var variantType = std.meta.intToEnum(dbus.BasicType, variantContains) catch dbus.BasicType.unknown;
+    // TODO: This should error rather than setting type to invalid.
+    var variantType = std.meta.intToEnum(dbus.BasicType, variantContains) catch dbus.BasicType.invalid;
 
-    // TODO: Should probably look into handling more types.
+    // TODO: Could probably look into handling more types.
     switch (variantType) {
         .string => {
-            // The title is a string, so get it
+            // Go right for the string
             var dictVariantStr: [*:0]const u8 = undefined;
             _ = dbus.messageIterGetBasic(&dictVariant, @as(*void, @ptrCast(&dictVariantStr)));
 
@@ -61,10 +173,11 @@ fn getDictValue(dictKey: *dbus.MessageIter) !void {
 
             std.debug.print("{s}\n", .{contentStr});
         },
-        .unknown => {},
+        else => {},
     }
 }
 
+/// Unpack metadata from a picked up message
 fn unpackMetadata(messageIter: *dbus.MessageIter) !void {
     var result = Metadata{};
     // Move to the value of Metadata key
@@ -120,16 +233,39 @@ fn unpackMetadata(messageIter: *dbus.MessageIter) !void {
     }
 }
 
-fn parseMessage(message: *dbus.MessageIter) !void {
+/// Parse message that is picked up.
+fn parseMessage(connection: *dbus.Connection, message: *dbus.Message) !void {
+
+    // Get the sender ID of the message received.
+    var sender = dbus.messageGetSender(message);
+    var senderId = extractString(sender) catch {
+        std.log.err("Failed to extract the sender ID from a message.", .{});
+        return;
+    };
+
+    var mediaplayerId = queryId(connection, "spotify") catch {
+        std.log.err("Failed to get the mediaplayer ID from DBus.", .{});
+        return;
+    };
+
+    // Guard to see that the message received is actually the mediaplayer of interest
+    if (!std.mem.eql(u8, senderId, mediaplayerId)) {
+        return;
+    }
+
+    // Initialize the iter
+    var iter: dbus.MessageIter = undefined;
+    _ = dbus.messageIterInit(message, &iter);
+
     // Skip the first string in the message, which is the sender interface
-    _ = dbus.messageIterNext(message);
+    _ = dbus.messageIterNext(&iter);
 
     // Guard to make sure we are not try to move into an empty array.
-    if (dbus.messageIterHasNext(message) == 1) {
+    if (dbus.messageIterHasNext(&iter) == 1) {
         // This is the first array containing the dict
         // The key tells us which contents are in it
         var variant: dbus.MessageIter = undefined;
-        _ = dbus.messageIterRecurse(message, &variant);
+        _ = dbus.messageIterRecurse(&iter, &variant);
 
         // Get the dict key
         var dictEntry: dbus.MessageIter = undefined;
@@ -147,6 +283,7 @@ fn parseMessage(message: *dbus.MessageIter) !void {
         switch (contentCase) {
             .Metadata => {
                 try unpackMetadata(&dictEntry);
+                try getProperty([*:0]const u8, connection);
             },
             .PlaybackStatus => {
                 try getDictValue(&dictEntry);
@@ -158,18 +295,15 @@ fn parseMessage(message: *dbus.MessageIter) !void {
     return;
 }
 
-fn messageHandler(connection: *dbus.Connection, message: *dbus.Message, user_data: *anyopaque) c_uint {
-    _ = connection;
+/// The message handler for messages that are picked up.
+fn messageHandler(connection: *dbus.Connection, message: *dbus.Message, user_data: *anyopaque) void {
     _ = user_data;
 
-    // Initialize the iter
-    var iter: dbus.MessageIter = undefined;
-    _ = dbus.messageIterInit(message, &iter);
-
-    var parsedData = try parseMessage(&iter);
+    // TODO: This needs to be handled.
+    var parsedData = parseMessage(connection, message) catch return;
     _ = parsedData;
 
-    return 0;
+    return;
 }
 
 pub fn main() !void {
