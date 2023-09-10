@@ -8,6 +8,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+     const zig_string = b.dependency("zig_string", .{
+        // These are the arguments to the dependency. It expects a target and optimization level.
+        .target = target,
+        .optimize = optimize,
+    });
+
     const exe = b.addExecutable(.{
         .name = "lizzy",
         // In this case the main source file is merely a path, however, in more
@@ -16,6 +22,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+        // my_remote_dep exposes a Zig module we wish to depend on.
+    exe.addModule("zig_string", zig_string.module("string"));
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default

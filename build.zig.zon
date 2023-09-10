@@ -1,0 +1,10 @@
+.{
+    .name = "lizzy",
+    .version = "0.1.0",
+    .dependencies = .{
+        . zig_string = .{
+            .url = "https://github.com/JakubSzark/zig-string/archive/refs/heads/master.tar.gz",
+            .hash = "12208d4461a2e24abd4c2875b6761defe5cd0ab0addc3e77668110a17e9349b207fd",
+        },
+    },
+}
