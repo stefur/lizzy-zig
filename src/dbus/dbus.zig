@@ -13,10 +13,7 @@ pub const Error = extern struct {
     padding1: *void,
 };
 
-const ErrorTypes = error{
-    MethodCallFailed,
-    SendMessageFailed
-};
+const MessagingErrors = error{ MethodCallFailed, SendMessageFailed, NoNameOwnerFound, NoMatchingVariant, NoMatchingEnum };
 
 // Probably not idiomatic
 pub const BasicType = enum(i32) {
@@ -28,7 +25,6 @@ pub const BasicType = enum(i32) {
 pub const typeArray: i32 = 97;
 pub const typeString: i32 = 115;
 pub const typeInvalid: i32 = 0;
-
 
 pub const MessageIter = extern struct {
     dummy1: *void,
@@ -49,7 +45,7 @@ pub const MessageIter = extern struct {
 
 pub const Connection = opaque {};
 pub const Message = opaque {};
-pub const HandleMessageFunction = *const fn (*Connection, *Message, *anyopaque) void;
+pub const HandleMessageFunction = *const fn (*Connection, *Message) void;
 pub const FreeFunction = opaque {};
 
 pub const BusType = enum(i32) {

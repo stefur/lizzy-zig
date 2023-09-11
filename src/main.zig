@@ -1,4 +1,5 @@
 const std = @import("std");
+const ArenaAllocator = @import("std").heap.ArenaAllocator;
 const dbus = @import("dbus/dbus.zig");
 const String = @import("zig_string").String;
 
@@ -14,13 +15,18 @@ fn extractString(ptr: [*]const u8) ![]const u8 {
     return slice;
 }
 
-pub const Metadata = struct {
+pub const MetadataContent = struct {
     artist: []const u8 = undefined,
     title: []const u8 = undefined,
 };
 
-const metadataContent = enum { @"xesam:title", @"xesam:artist", other };
-const messageContent = enum { Metadata, PlaybackStatus, other };
+const MetadataProperty = enum { @"xesam:title", @"xesam:artist", other };
+const MessageProperty = enum { Metadata, PlaybackStatus, other };
+const PlaybackStatusProperty = enum { Playing, Paused, Unknown };
+
+const Song = struct { metadata: MetadataContent = undefined, playbackstatus: PlaybackStatusProperty = undefined };
+
+const Property = union { metadata: MetadataContent, playbackstatus: PlaybackStatusProperty };
 
 /// Ask DBus for the nameowner (ID) of an interface
 fn queryId(connection: *dbus.Connection, mediaplayer: []const u8) ![]const u8 {
@@ -62,9 +68,8 @@ fn queryId(connection: *dbus.Connection, mediaplayer: []const u8) ![]const u8 {
         1000,
         &err,
     ) orelse {
-        const error_message = if (dbus.errorIsSet(&err) != 0) err.message else "unknown";
-        std.log.err("dbus_client: dbus.connectionSendWithReplyAndBlock failed. Error: {s}", .{error_message});
-        return error.SendMessageFailed;
+        // This will error if the mediaplayer is not running, which is fine
+        return error.NoNameOwnerFound;
     };
 
     dbus.messageUnref(query_message);
@@ -80,12 +85,21 @@ fn queryId(connection: *dbus.Connection, mediaplayer: []const u8) ![]const u8 {
 
     var idString = try extractString(id);
 
-    std.debug.print("ID from query: {s}\n", .{idString});
     return idString;
 }
 
 /// Ask for a given property of the mediaplayer, e.g. metadata fields or playbackstatus
-fn getProperty(comptime T: type, connection: *dbus.Connection) !void {
+fn getProperty(comptime T: type, connection: *dbus.Connection, property: MessageProperty) !Property {
+    const propertyArgument = switch (property) {
+        .Metadata => "Metadata",
+        .PlaybackStatus => "PlaybackStatus",
+        else => {
+            return error.NoMatchingEnum;
+        },
+    };
+
+    const player = "org.mpris.MediaPlayer2.Player";
+
     var err: dbus.Error = undefined;
     dbus.errorInit(&err);
 
@@ -96,13 +110,10 @@ fn getProperty(comptime T: type, connection: *dbus.Connection) !void {
         "Get",
     ) orelse {
         std.log.err("dbus_client: dbus_message_new_method_call failed.", .{});
-        return;
+        return error.MethodCallFailed;
     };
 
-    const arg1 = "org.mpris.MediaPlayer2.Player";
-    const arg2 = "PlaybackStatus";
-
-    _ = dbus.messageAppendArgs(query_message, dbus.typeString, &arg1, dbus.typeString, &arg2, dbus.typeInvalid);
+    _ = dbus.messageAppendArgs(query_message, dbus.typeString, &player, dbus.typeString, &propertyArgument, dbus.typeInvalid);
 
     var reply_message: *dbus.Message = dbus.connectionSendWithReplyAndBlock(
         connection,
@@ -111,28 +122,55 @@ fn getProperty(comptime T: type, connection: *dbus.Connection) !void {
         &err,
     ) orelse {
         std.log.err("dbus_client: dbus.connectionSendWithReplyAndBlock failed. Error", .{});
-        return;
+        return error.SendMessageFailed;
     };
 
     dbus.messageUnref(query_message);
 
-    var iter: dbus.MessageIter = undefined;
-    var sub: dbus.MessageIter = undefined;
+    switch (property) {
+        .Metadata => {
+            var iter: dbus.MessageIter = undefined;
+            var sub: dbus.MessageIter = undefined;
 
-    _ = dbus.messageIterInit(reply_message, &iter);
+            _ = dbus.messageIterInit(reply_message, &iter);
 
-    dbus.messageIterRecurse(&iter, &sub);
+            dbus.messageIterRecurse(&iter, &sub);
 
-    var result: T = undefined;
-    dbus.messageIterGetBasic(&sub, @as(*void, @ptrCast(&result)));
-    dbus.messageUnref(reply_message);
+            // Enter array
+            var array: dbus.MessageIter = undefined;
+            dbus.messageIterRecurse(&sub, &array);
 
-    std.debug.print("Response: {s}", .{result});
-    //return result;
+            var metadata = try loopArray(&array);
+
+            var result = Property{ .metadata = MetadataContent{ .artist = metadata.artist, .title = metadata.title } };
+            return result;
+        },
+        .PlaybackStatus => {
+            var iter: dbus.MessageIter = undefined;
+            var sub: dbus.MessageIter = undefined;
+
+            _ = dbus.messageIterInit(reply_message, &iter);
+
+            dbus.messageIterRecurse(&iter, &sub);
+
+            var value: T = undefined;
+            dbus.messageIterGetBasic(&sub, @as(*void, @ptrCast(&value)));
+            dbus.messageUnref(reply_message);
+
+            var valueString = try extractString(value);
+
+            var status = std.meta.stringToEnum(PlaybackStatusProperty, valueString) orelse PlaybackStatusProperty.Unknown;
+
+            return Property{ .playbackstatus = status };
+        },
+        else => {
+            return error.NoMatchingEnum;
+        },
+    }
 }
 
 /// Get the dict value from a MessageIter depending on the type within.
-fn getDictValue(dictKey: *dbus.MessageIter) !void {
+fn getDictValue(dictKey: *dbus.MessageIter) ![]const u8 {
     // Move to the value which is a variant
     _ = dbus.messageIterNext(dictKey);
 
@@ -155,7 +193,7 @@ fn getDictValue(dictKey: *dbus.MessageIter) !void {
             // And extract it
             var dictValueStr = try extractString(dictVariantStr);
 
-            std.debug.print("{s}\n", .{dictValueStr});
+            return dictValueStr;
         },
         .array => {
 
@@ -171,15 +209,60 @@ fn getDictValue(dictKey: *dbus.MessageIter) !void {
             // And extract it
             var contentStr = try extractString(artistString);
 
-            std.debug.print("{s}\n", .{contentStr});
+            return contentStr;
         },
-        else => {},
+        else => {
+            return error.NoMatchingVariant;
+        },
+    }
+}
+
+/// Loop an array of dict entries where the keys are metadata fields
+fn loopArray(arrayIter: *dbus.MessageIter) !MetadataContent {
+    var result = MetadataContent{};
+    while (true) {
+        // Move into the content key
+        var dictKey: dbus.MessageIter = undefined;
+        _ = dbus.messageIterRecurse(arrayIter, &dictKey);
+
+        // Get the key
+        var dictKeyVal: [*:0]const u8 = undefined;
+        _ = dbus.messageIterGetBasic(&dictKey, @as(*void, @ptrCast(&dictKeyVal)));
+
+        // Extract the metadata key
+        var dictKeyStr = try extractString(dictKeyVal);
+
+        // Match it to an enum
+        var metadataCase = std.meta.stringToEnum(MetadataProperty, dictKeyStr) orelse MetadataProperty.other;
+
+        switch (metadataCase) {
+            .@"xesam:title" => {
+                result.title = try getDictValue(&dictKey);
+            },
+            .@"xesam:artist" => {
+                result.artist = try getDictValue(&dictKey);
+            },
+            // All other metadata gets skipped
+            .other => {},
+        }
+
+        // Break loop early in case we have picked up both fields
+        if (result.artist.len > 0 and result.title.len > 0) {
+            return result;
+        }
+
+        // For safety, check if there is another item in the metadata array before proceeding to the next dict entry
+        if (dbus.messageIterHasNext(arrayIter) == 1) {
+            _ = dbus.messageIterNext(arrayIter);
+        } else {
+            // Otherwise break the loop
+            return result;
+        }
     }
 }
 
 /// Unpack metadata from a picked up message
-fn unpackMetadata(messageIter: *dbus.MessageIter) !void {
-    var result = Metadata{};
+fn unpackMetadata(messageIter: *dbus.MessageIter) !MetadataContent {
     // Move to the value of Metadata key
     _ = dbus.messageIterNext(messageIter);
 
@@ -192,49 +275,12 @@ fn unpackMetadata(messageIter: *dbus.MessageIter) !void {
     _ = dbus.messageIterRecurse(&messageVariant, &messageArray);
 
     // Loop the array of dicts
-    while (true) {
-        // Move into the content key
-        var dictKey: dbus.MessageIter = undefined;
-        _ = dbus.messageIterRecurse(&messageArray, &dictKey);
-
-        // Get the key
-        var dictKeyVal: [*:0]const u8 = undefined;
-        _ = dbus.messageIterGetBasic(&dictKey, @as(*void, @ptrCast(&dictKeyVal)));
-
-        // Extract the metadata key
-        var dictKeyStr = try extractString(dictKeyVal);
-
-        // Match it to an enum
-        var metadataCase = std.meta.stringToEnum(metadataContent, dictKeyStr) orelse metadataContent.other;
-
-        switch (metadataCase) {
-            .@"xesam:title" => {
-                try getDictValue(&dictKey);
-            },
-            .@"xesam:artist" => {
-                try getDictValue(&dictKey);
-            },
-            // All other metadata gets skipped
-            .other => {},
-        }
-
-        // Break loop early in case we have picked up both fields
-        if (result.artist.len > 0 and result.title.len > 0) {
-            break;
-        }
-
-        // For safety, check if there is another item in the metadata array before proceeding to the next dict entry
-        if (dbus.messageIterHasNext(&messageArray) == 1) {
-            _ = dbus.messageIterNext(&messageArray);
-        } else {
-            // Otherwise break the loop
-            break;
-        }
-    }
+    return loopArray(&messageArray);
 }
 
 /// Parse message that is picked up.
 fn parseMessage(connection: *dbus.Connection, message: *dbus.Message) !void {
+    var result = Song{};
 
     // Get the sender ID of the message received.
     var sender = dbus.messageGetSender(message);
@@ -243,10 +289,7 @@ fn parseMessage(connection: *dbus.Connection, message: *dbus.Message) !void {
         return;
     };
 
-    var mediaplayerId = queryId(connection, "spotify") catch {
-        std.log.err("Failed to get the mediaplayer ID from DBus.", .{});
-        return;
-    };
+    var mediaplayerId = try queryId(connection, "spotify");
 
     // Guard to see that the message received is actually the mediaplayer of interest
     if (!std.mem.eql(u8, senderId, mediaplayerId)) {
@@ -278,26 +321,31 @@ fn parseMessage(connection: *dbus.Connection, message: *dbus.Message) !void {
         // Extract the string
         var extractedKeyStr = try extractString(keyStr);
 
-        var contentCase = std.meta.stringToEnum(messageContent, extractedKeyStr) orelse messageContent.other;
+        var contentCase = std.meta.stringToEnum(MessageProperty, extractedKeyStr) orelse MessageProperty.other;
 
+        //TODO: Not sure how this holds up.
         switch (contentCase) {
             .Metadata => {
-                try unpackMetadata(&dictEntry);
-                try getProperty([*:0]const u8, connection);
+                result.metadata = try unpackMetadata(&dictEntry);
+                const propertyResult = try getProperty([*:0]const u8, connection, MessageProperty.PlaybackStatus);
+                result.playbackstatus = propertyResult.playbackstatus;
             },
             .PlaybackStatus => {
-                try getDictValue(&dictEntry);
+                var playbackstatus = try getDictValue(&dictEntry);
+                result.playbackstatus = std.meta.stringToEnum(PlaybackStatusProperty, playbackstatus) orelse PlaybackStatusProperty.Unknown;
+                const propertyResult = try getProperty([*:0]const u8, connection, MessageProperty.Metadata);
+                result.metadata = propertyResult.metadata;
             },
             .other => {},
         }
     }
 
+    std.debug.print("Artist: {s}, Title: {s}, Status: {?}\n", .{ result.metadata.artist, result.metadata.title, result.playbackstatus });
     return;
 }
 
 /// The message handler for messages that are picked up.
-fn messageHandler(connection: *dbus.Connection, message: *dbus.Message, user_data: *anyopaque) void {
-    _ = user_data;
+fn messageHandler(connection: *dbus.Connection, message: *dbus.Message) void {
 
     // TODO: This needs to be handled.
     var parsedData = parseMessage(connection, message) catch return;
