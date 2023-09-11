@@ -340,7 +340,7 @@ fn parseMessage(connection: *dbus.Connection, message: *dbus.Message) !void {
         }
     }
 
-    std.debug.print("Artist: {s}, Title: {s}, Status: {?}\n", .{ result.metadata.artist, result.metadata.title, result.playbackstatus });
+    std.debug.print("Artist: {s}, Title: {s}, Status: {s}\n", .{ result.metadata.artist, result.metadata.title, @tagName(result.playbackstatus) });
     return;
 }
 
