@@ -20,9 +20,9 @@ pub const MetadataContent = struct {
     title: []const u8 = undefined,
 };
 
-const MetadataProperty = enum { @"xesam:title", @"xesam:artist", other };
-const MessageProperty = enum { Metadata, PlaybackStatus, other };
-const PlaybackStatusProperty = enum { Playing, Paused, Unknown };
+const MetadataProperty = enum { @"xesam:title", @"xesam:artist", Other };
+const MessageProperty = enum { Metadata, PlaybackStatus };
+const PlaybackStatusProperty = enum { Playing, Paused };
 
 const Song = struct { metadata: MetadataContent = undefined, playbackstatus: PlaybackStatusProperty = undefined };
 
@@ -93,9 +93,6 @@ fn getProperty(comptime T: type, connection: *dbus.Connection, property: Message
     const propertyArgument = switch (property) {
         .Metadata => "Metadata",
         .PlaybackStatus => "PlaybackStatus",
-        else => {
-            return error.NoMatchingEnum;
-        },
     };
 
     const player = "org.mpris.MediaPlayer2.Player";
@@ -159,12 +156,9 @@ fn getProperty(comptime T: type, connection: *dbus.Connection, property: Message
 
             var valueString = try extractString(value);
 
-            var status = std.meta.stringToEnum(PlaybackStatusProperty, valueString) orelse PlaybackStatusProperty.Unknown;
+            var status = std.meta.stringToEnum(PlaybackStatusProperty, valueString).?;
 
             return Property{ .playbackstatus = status };
-        },
-        else => {
-            return error.NoMatchingEnum;
         },
     }
 }
@@ -181,7 +175,9 @@ fn getDictValue(dictKey: *dbus.MessageIter) ![]const u8 {
     var variantContains = dbus.messageIterGetArgType(&dictVariant);
 
     // TODO: This should error rather than setting type to invalid.
-    var variantType = std.meta.intToEnum(dbus.BasicType, variantContains) catch dbus.BasicType.invalid;
+    var variantType = std.meta.intToEnum(dbus.BasicType, variantContains) catch {
+        return error.IntToEnumError;
+    };
 
     // TODO: Could probably look into handling more types.
     switch (variantType) {
@@ -233,7 +229,7 @@ fn loopArray(arrayIter: *dbus.MessageIter) !MetadataContent {
         var dictKeyStr = try extractString(dictKeyVal);
 
         // Match it to an enum
-        var metadataCase = std.meta.stringToEnum(MetadataProperty, dictKeyStr) orelse MetadataProperty.other;
+        var metadataCase = std.meta.stringToEnum(MetadataProperty, dictKeyStr) orelse MetadataProperty.Other;
 
         switch (metadataCase) {
             .@"xesam:title" => {
@@ -243,7 +239,7 @@ fn loopArray(arrayIter: *dbus.MessageIter) !MetadataContent {
                 result.artist = try getDictValue(&dictKey);
             },
             // All other metadata gets skipped
-            .other => {},
+            else => {},
         }
 
         // Break loop early in case we have picked up both fields
@@ -321,7 +317,7 @@ fn parseMessage(connection: *dbus.Connection, message: *dbus.Message) !void {
         // Extract the string
         var extractedKeyStr = try extractString(keyStr);
 
-        var contentCase = std.meta.stringToEnum(MessageProperty, extractedKeyStr) orelse MessageProperty.other;
+        var contentCase = std.meta.stringToEnum(MessageProperty, extractedKeyStr).?;
 
         //TODO: Not sure how this holds up.
         switch (contentCase) {
@@ -332,11 +328,10 @@ fn parseMessage(connection: *dbus.Connection, message: *dbus.Message) !void {
             },
             .PlaybackStatus => {
                 var playbackstatus = try getDictValue(&dictEntry);
-                result.playbackstatus = std.meta.stringToEnum(PlaybackStatusProperty, playbackstatus) orelse PlaybackStatusProperty.Unknown;
+                result.playbackstatus = std.meta.stringToEnum(PlaybackStatusProperty, playbackstatus).?;
                 const propertyResult = try getProperty([*:0]const u8, connection, MessageProperty.Metadata);
                 result.metadata = propertyResult.metadata;
             },
-            .other => {},
         }
     }
 
