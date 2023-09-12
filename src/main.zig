@@ -20,7 +20,7 @@ pub const MetadataContent = struct {
     title: []const u8 = undefined,
 };
 
-const MetadataProperty = enum { @"xesam:title", @"xesam:artist", Other };
+const MetadataProperty = enum { @"xesam:title", @"xesam:artist" };
 const MessageProperty = enum { Metadata, PlaybackStatus };
 const PlaybackStatusProperty = enum { Playing, Paused };
 
@@ -229,17 +229,17 @@ fn loopArray(arrayIter: *dbus.MessageIter) !MetadataContent {
         var dictKeyStr = try extractString(dictKeyVal);
 
         // Match it to an enum
-        var metadataCase = std.meta.stringToEnum(MetadataProperty, dictKeyStr) orelse MetadataProperty.Other;
+        var metadataCase = std.meta.stringToEnum(MetadataProperty, dictKeyStr);
 
-        switch (metadataCase) {
-            .@"xesam:title" => {
-                result.title = try getDictValue(&dictKey);
-            },
-            .@"xesam:artist" => {
-                result.artist = try getDictValue(&dictKey);
-            },
-            // All other metadata gets skipped
-            else => {},
+        if (metadataCase) |metadata| {
+            switch (metadata) {
+                .@"xesam:title" => {
+                    result.title = try getDictValue(&dictKey);
+                },
+                .@"xesam:artist" => {
+                    result.artist = try getDictValue(&dictKey);
+                },
+            }
         }
 
         // Break loop early in case we have picked up both fields
@@ -317,21 +317,22 @@ fn parseMessage(connection: *dbus.Connection, message: *dbus.Message) !void {
         // Extract the string
         var extractedKeyStr = try extractString(keyStr);
 
-        var contentCase = std.meta.stringToEnum(MessageProperty, extractedKeyStr).?;
+        var contentCase = std.meta.stringToEnum(MessageProperty, extractedKeyStr);
 
-        //TODO: Not sure how this holds up.
-        switch (contentCase) {
-            .Metadata => {
-                result.metadata = try unpackMetadata(&dictEntry);
-                const propertyResult = try getProperty([*:0]const u8, connection, MessageProperty.PlaybackStatus);
-                result.playbackstatus = propertyResult.playbackstatus;
-            },
-            .PlaybackStatus => {
-                var playbackstatus = try getDictValue(&dictEntry);
-                result.playbackstatus = std.meta.stringToEnum(PlaybackStatusProperty, playbackstatus).?;
-                const propertyResult = try getProperty([*:0]const u8, connection, MessageProperty.Metadata);
-                result.metadata = propertyResult.metadata;
-            },
+        if (contentCase) |content| {
+            switch (content) {
+                .Metadata => {
+                    result.metadata = try unpackMetadata(&dictEntry);
+                    const propertyResult = try getProperty([*:0]const u8, connection, MessageProperty.PlaybackStatus);
+                    result.playbackstatus = propertyResult.playbackstatus;
+                },
+                .PlaybackStatus => {
+                    var playbackstatus = try getDictValue(&dictEntry);
+                    result.playbackstatus = std.meta.stringToEnum(PlaybackStatusProperty, playbackstatus).?;
+                    const propertyResult = try getProperty([*:0]const u8, connection, MessageProperty.Metadata);
+                    result.metadata = propertyResult.metadata;
+                },
+            }
         }
     }
 
